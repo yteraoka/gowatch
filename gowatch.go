@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"github.com/BurntSushi/toml"
 	"github.com/hpcloud/tail"
 	"github.com/mattn/go-shellwords"
@@ -14,6 +15,11 @@ import (
 )
 
 const DEFAULT_CONF_FILE = "config.toml"
+
+var (
+	version string
+	date    string
+)
 
 var verbose bool = false
 
@@ -119,6 +125,20 @@ func handleInput(s string, conf *WatchConfig) {
 }
 
 func main() {
+	for _, argv := range os.Args {
+		if argv == "-v" {
+			fmt.Println("gowatch version:", version)
+			fmt.Println("build date:", date)
+			os.Exit(1)
+		} else if argv == "-h" {
+			fmt.Println("Usage: gowatch [-v] [-h] [/path/to/config.toml]")
+			fmt.Println("       -v: show version")
+			fmt.Println("       -h: show this message")
+			fmt.Println("use config.toml in the current directory if no config file path is given.")
+			os.Exit(1)
+		}
+	}
+
 	var config Config
 	conf_file := DEFAULT_CONF_FILE
 	if len(os.Args) > 1 {
