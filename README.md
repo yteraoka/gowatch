@@ -32,9 +32,16 @@ patterns = [
 commands = [
   "service foobar restart",
 ]
+
+[[rules]]
+name = "test3"
+patterns = [
+  "WARNING",
+]
+commands = [
+  "service foobar restart",
+]
+window_sec = 30
+max_in_window = 10
+backoff = 30
 ```
-
-TODO
-----
-
-- Fire an event when the number of matched logs within the specified time exceeds the specified number
