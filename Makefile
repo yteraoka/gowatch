@@ -1,6 +1,6 @@
 BINARY=gowatch
 
-VERSION := 0.1.0
+VERSION := 0.2.0
 DATE := `date +%FT%T%z`
 TARGET := $(BINARY) $(BINARY).mac $(BINARY).exe
 
