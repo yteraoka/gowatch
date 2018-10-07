@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"container/ring"
 	"fmt"
 	"github.com/BurntSushi/toml"
 	"github.com/hpcloud/tail"
@@ -35,6 +36,8 @@ type Rule struct {
 	RegexpPatterns []string `toml:"regexp_patterns"`
 	Commands       []string `toml:"commands"`
 	Backoff        int      `toml:"backoff"`
+	WindowSec      int      `toml:"window_sec"`
+	MaxInWindow    int      `toml:"max_in_window"`
 }
 
 type CmdArgs []string
@@ -46,7 +49,14 @@ type WatchConfig struct {
 	Commands        [][]string
 	Backoff         int
 	IgnoreUntil     time.Time
-	Channel         chan string
+	Channel         chan Event
+	Window          time.Duration
+	Events          *ring.Ring
+}
+
+type Event struct {
+	ReadAt time.Time
+	Text   string
 }
 
 func matchSimple(s string, patterns []string) bool {
@@ -67,12 +77,16 @@ func matchRegexp(s string, patterns []*regexp.Regexp) bool {
 	return false
 }
 
-func execCommand(s string, args []string) {
+func (e Event) String() string {
+	return fmt.Sprintf("%s %s", e.ReadAt, e.Text)
+}
+
+func execCommand(e Event, args []string) {
 	log.Printf("INFO exec: %v\n", args)
 	cmd_name := args[0]
 	opt_args := args[1:]
 	cmd := exec.Command(cmd_name, opt_args...)
-	cmd.Stdin = strings.NewReader(s)
+	cmd.Stdin = strings.NewReader(e.String())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -85,43 +99,59 @@ func execCommand(s string, args []string) {
 	log.Printf("INFO %s STDERR: %s\n", args, strings.TrimRight(stderr.String(), "\n"))
 }
 
+func overWindowLimit(e Event, conf *WatchConfig) bool {
+	conf.Events.Value = e
+	conf.Events = conf.Events.Next()
+	nextEvent := conf.Events.Value
+	if ne, ok := nextEvent.(Event); ok {
+		if ne.ReadAt.Unix() > time.Now().Add(-1 * conf.Window).Unix() {
+			if verbose {
+				log.Println("DEBUG Ring buffer is full")
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func handleMatched(conf *WatchConfig) {
 	for {
-		s := <-conf.Channel
+		event := <-conf.Channel
 		if verbose {
-			log.Println("DEBUG received:", s)
+			log.Println("DEBUG received:", event.Text)
+		}
+		if conf.Window.Seconds() > 0 {
+			if overWindowLimit(event, conf) != true {
+				continue
+			}
 		}
 		for _, args := range conf.Commands {
-			go execCommand(s, args)
+			go execCommand(event, args)
+		}
+		if conf.Backoff > 0 {
+			conf.IgnoreUntil = time.Now().Add(time.Second * time.Duration(conf.Backoff))
 		}
 	}
 }
 
-func handleInput(s string, conf *WatchConfig) {
+func handleInput(event Event, conf *WatchConfig) {
 	var match bool
 	if len(conf.Patterns) > 0 {
-		match = matchSimple(s, conf.Patterns)
+		match = matchSimple(event.Text, conf.Patterns)
 	}
 	if match == false && len(conf.CompiledRegexps) > 0 {
-		match = matchRegexp(s, conf.CompiledRegexps)
+		match = matchRegexp(event.Text, conf.CompiledRegexps)
 	}
 	if match == false {
 		return
 	}
-	now := time.Now()
-	if conf.Backoff > 0 {
-		if now.Unix() > conf.IgnoreUntil.Unix() {
-			conf.IgnoreUntil = now.Add(time.Second * time.Duration(conf.Backoff))
-			log.Printf("INFO %s ignore event ultil %s\n", conf.Name, conf.IgnoreUntil.String())
-		} else {
-			// Ignore
-			if verbose {
-				log.Printf("DEBUG Skip matched event: %s\n", s)
-			}
-			return
+	if conf.Backoff > 0 && event.ReadAt.Unix() < conf.IgnoreUntil.Unix() {
+		if verbose {
+			log.Printf("DEBUG Skipping matched event: `%s` until: %s\n", event.Text, conf.IgnoreUntil)
 		}
+		return
 	}
-	conf.Channel <- s
+	conf.Channel <- event
 }
 
 func main() {
@@ -186,10 +216,16 @@ func main() {
 			log.Fatalf("no commands defined for rule %s\n", conf.Name)
 		}
 
+		if rule.MaxInWindow > 0 && rule.WindowSec > 0 {
+			log.Printf("INFO RuleSet[%d] WindowSec: %ds, MaxInWindow: %d\n", i, rule.WindowSec, rule.MaxInWindow)
+			conf.Window = time.Second * time.Duration(rule.WindowSec)
+			conf.Events = ring.New(rule.MaxInWindow)
+		}
+
 		log.Printf("INFO RuleSet[%d] backoff: %d\n", i, rule.Backoff)
 		conf.Backoff = rule.Backoff
 
-		conf.Channel = make(chan string)
+		conf.Channel = make(chan Event)
 
 		watch = append(watch, &conf)
 
@@ -216,7 +252,8 @@ func main() {
 		}
 		// handle each RuleSet
 		for _, c := range watch {
-			handleInput(line.Text, c)
+			event := Event{ReadAt: time.Now(), Text: line.Text}
+			handleInput(event, c)
 		}
 	}
 }
